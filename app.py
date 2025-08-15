@@ -106,7 +106,34 @@ def get_channel_videos(channel_handle, max_videos=10):
         st.error(f"YouTube API error: {e}")
         return []
 
-# Function to download and cache transcripts
+# Function to get video metadata
+def get_video_metadata(video_id):
+    try:
+        youtube = get_youtube_service()
+        
+        # Get video details
+        video_response = youtube.videos().list(
+            part='snippet',
+            id=video_id
+        ).execute()
+        
+        if video_response['items']:
+            video_info = video_response['items'][0]['snippet']
+            return {
+                'title': video_info['title'],
+                'published_at': video_info['publishedAt'],
+                'channel_title': video_info['channelTitle'],
+                'description': video_info.get('description', '')
+            }
+    except Exception as e:
+        st.error(f"Error fetching metadata for {video_id}: {e}")
+    
+    return {
+        'title': f'Video {video_id}',
+        'published_at': 'Unknown',
+        'channel_title': 'Unknown',
+        'description': ''
+    }
 def download_and_cache_transcript(video_id, use_proxy=True):
     cache_file = os.path.join(CACHE_DIR, f"{video_id}.json")
     
@@ -152,18 +179,30 @@ def search_all_transcripts(search_term):
             with open(os.path.join(CACHE_DIR, filename), 'r') as f:
                 transcript = json.load(f)
             
+            video_results = []
             for entry in transcript:
                 if search_term.lower() in entry['text'].lower():
-                    results.append({
-                        'video_id': video_id,
+                    video_results.append({
                         'timestamp': entry['start'],
                         'text': entry['text']
                     })
+            
+            if video_results:
+                # Get video metadata
+                metadata = get_video_metadata(video_id)
+                results.append({
+                    'video_id': video_id,
+                    'metadata': metadata,
+                    'matches': video_results
+                })
     
     return results
 
-# Sidebar for adding channels
-st.sidebar.header("Add Channel")
+# Sidebar for adding channels and manual videos
+st.sidebar.header("Add Content")
+
+# Channel section
+st.sidebar.subheader("Add Channel")
 channel_handle = st.sidebar.text_input("Enter YouTube Channel Handle (e.g., @joerogan):")
 max_videos = st.sidebar.number_input("Number of videos to download:", min_value=1, max_value=50, value=10)
 
@@ -198,42 +237,79 @@ if st.sidebar.button("Download Channel Transcripts"):
     else:
         st.sidebar.error("Please enter a channel handle")
 
+# Manual video section
+st.sidebar.subheader("Add Single Video")
+video_id_input = st.sidebar.text_input("Enter YouTube Video ID:")
+if st.sidebar.button("Download Video Transcript"):
+    if video_id_input:
+        with st.sidebar:
+            with st.spinner("Downloading transcript..."):
+                transcript = download_and_cache_transcript(video_id_input, use_proxy=False)
+                if transcript:
+                    st.success(f"Successfully cached transcript for video {video_id_input}")
+                else:
+                    st.error("Failed to download transcript")
+
 # Main search interface
 st.header("Search Transcripts")
 
-# Show cached transcript count
-cached_count = len([f for f in os.listdir(CACHE_DIR) if f.endswith('.json')]) if os.path.exists(CACHE_DIR) else 0
-st.info(f"Currently have {cached_count} cached transcripts")
-
 search_term = st.text_input("Enter search term:")
 
-if st.button("Search All Transcripts"):
-    if search_term:
-        results = search_all_transcripts(search_term)
+if search_term:
+    results = search_all_transcripts(search_term)
+    
+    if results:
+        st.success(f"Found {sum(len(r['matches']) for r in results)} results across {len(results)} videos")
         
-        if results:
-            st.success(f"Found {len(results)} results")
+        for video_result in results:
+            video_id = video_result['video_id']
+            metadata = video_result['metadata']
+            matches = video_result['matches']
             
-            for result in results:
-                with st.expander(f"Video: {result['video_id']} - Timestamp: {result['timestamp']:.1f}s"):
-                    st.write(result['text'])
-                    
-                    # YouTube embed with timestamp
-                    video_url = f"https://www.youtube.com/embed/{result['video_id']}?start={int(result['timestamp'])}"
-                    st.components.v1.iframe(video_url, width=560, height=315)
-        else:
-            st.warning("No results found in cached transcripts")
+            # Format publish date
+            try:
+                from datetime import datetime
+                publish_date = datetime.fromisoformat(metadata['published_at'].replace('Z', '+00:00'))
+                formatted_date = publish_date.strftime("%B %d, %Y")
+            except:
+                formatted_date = metadata['published_at']
+            
+            # Video header with title and metadata
+            st.markdown(f"## {metadata['title']}")
+            st.markdown(f"**Channel:** {metadata['channel_title']} | **Published:** {formatted_date}")
+            st.markdown("---")
+            
+            # Create a container for the video player that can be updated
+            video_container = st.empty()
+            
+            # Default video URL starts at the first match timestamp
+            first_match_timestamp = int(matches[0]['timestamp'])
+            current_video_url = f"https://www.youtube.com/embed/{video_id}?start={first_match_timestamp}"
+            
+            # Show matches with clickable timestamps
+            st.markdown(f"**{len(matches)} matches found:**")
+            
+            # Check if any timestamp button was clicked
+            clicked_timestamp = None
+            for i, match in enumerate(matches):
+                timestamp_seconds = int(match['timestamp'])
+                
+                # Create clickable timestamp
+                col1, col2 = st.columns([1, 4])
+                with col1:
+                    if st.button(f"{timestamp_seconds//60}:{timestamp_seconds%60:02d}", key=f"{video_id}_{i}"):
+                        clicked_timestamp = timestamp_seconds
+                with col2:
+                    st.write(f"*{match['text']}*")
+            
+            # Update video URL if a timestamp was clicked
+            if clicked_timestamp is not None:
+                current_video_url = f"https://www.youtube.com/embed/{video_id}?start={clicked_timestamp}"
+            
+            # Display the video (either default or with timestamp)
+            with video_container:
+                st.components.v1.iframe(current_video_url, width=560, height=315)
+            
+            st.markdown("---")
     else:
-        st.error("Please enter a search term")
-
-# Manual video ID input for testing
-st.header("Manual Video Addition")
-video_id_input = st.text_input("Enter YouTube Video ID to download transcript:")
-if st.button("Download Single Video"):
-    if video_id_input:
-        with st.spinner("Downloading transcript..."):
-            transcript = download_and_cache_transcript(video_id_input, use_proxy=False)
-            if transcript:
-                st.success(f"Successfully cached transcript for video {video_id_input}")
-            else:
-                st.error("Failed to download transcript")
+        st.warning("No results found in cached transcripts")
