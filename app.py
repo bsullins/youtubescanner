@@ -165,12 +165,88 @@ def download_and_cache_transcript(video_id, use_proxy=True):
         st.error(f"Error downloading transcript for {video_id}: {e}")
         return None
 
+# Function to get all unique channels from cached transcripts
+def get_cached_channels():
+    channels = set()
+    
+    if not os.path.exists(CACHE_DIR):
+        return []
+    
+    for filename in os.listdir(CACHE_DIR):
+        if filename.endswith('.json'):
+            video_id = filename[:-5]
+            try:
+                metadata = get_video_metadata(video_id)
+                if metadata['channel_title'] != 'Unknown':
+                    channels.add(metadata['channel_title'])
+            except:
+                continue
+    
+    return sorted(list(channels))
+
+# Function to create smart search pattern for plurals
+def create_smart_search_pattern(search_term):
+    """
+    Creates a regex pattern that matches the search term and its common plural forms
+    while maintaining whole word boundaries.
+    """
+    escaped_term = re.escape(search_term.lower())
+    
+    # Handle common plural patterns
+    patterns = [escaped_term]  # Original term
+    
+    # Add plural variations
+    if search_term.endswith('y'):
+        # city -> cities, berry -> berries
+        stem = escaped_term[:-1]
+        patterns.append(stem + 'ies')
+    elif search_term.endswith(('s', 'sh', 'ch', 'x', 'z')):
+        # bus -> buses, dish -> dishes, box -> boxes
+        patterns.append(escaped_term + 'es')
+    elif search_term.endswith('f'):
+        # leaf -> leaves, wolf -> wolves
+        stem = escaped_term[:-1]
+        patterns.append(stem + 'ves')
+    elif search_term.endswith('fe'):
+        # knife -> knives, wife -> wives
+        stem = escaped_term[:-2]
+        patterns.append(stem + 'ves')
+    else:
+        # Regular plurals: cat -> cats, dog -> dogs
+        patterns.append(escaped_term + 's')
+    
+    # Also handle reverse - if someone searches for plural, find singular
+    if search_term.endswith('ies'):
+        # cities -> city, berries -> berry
+        stem = escaped_term[:-3]
+        patterns.append(stem + 'y')
+    elif search_term.endswith('ves'):
+        # leaves -> leaf, knives -> knife
+        stem = escaped_term[:-3]
+        patterns.append(stem + 'f')
+        patterns.append(stem + 'fe')
+    elif search_term.endswith('es') and len(search_term) > 3:
+        # dishes -> dish, boxes -> box (but not "es" -> "e")
+        stem = escaped_term[:-2]
+        patterns.append(stem)
+    elif search_term.endswith('s') and len(search_term) > 2:
+        # cats -> cat, dogs -> dog (but not "is" -> "i")
+        stem = escaped_term[:-1]
+        patterns.append(stem)
+    
+    # Create pattern with word boundaries
+    pattern_string = r'\b(?:' + '|'.join(patterns) + r')\b'
+    return re.compile(pattern_string, re.IGNORECASE)
+
 # Function to search all cached transcripts
-def search_all_transcripts(search_term):
+def search_all_transcripts(search_term, channel_filter=None):
     results = []
     
     if not os.path.exists(CACHE_DIR):
         return results
+    
+    # Create smart search pattern that handles plurals
+    pattern = create_smart_search_pattern(search_term)
     
     for filename in os.listdir(CACHE_DIR):
         if filename.endswith('.json'):
@@ -181,7 +257,8 @@ def search_all_transcripts(search_term):
             
             video_results = []
             for entry in transcript:
-                if search_term.lower() in entry['text'].lower():
+                # Use smart pattern for whole word matching with plurals
+                if pattern.search(entry['text']):
                     video_results.append({
                         'timestamp': entry['start'],
                         'text': entry['text']
@@ -190,11 +267,19 @@ def search_all_transcripts(search_term):
             if video_results:
                 # Get video metadata
                 metadata = get_video_metadata(video_id)
+                
+                # Apply channel filter if specified
+                if channel_filter and channel_filter != "All Channels" and metadata['channel_title'] != channel_filter:
+                    continue
+                
                 results.append({
                     'video_id': video_id,
                     'metadata': metadata,
                     'matches': video_results
                 })
+    
+    # Sort results by publish date (newest first)
+    results.sort(key=lambda x: x['metadata']['published_at'], reverse=True)
     
     return results
 
@@ -253,10 +338,20 @@ if st.sidebar.button("Download Video Transcript"):
 # Main search interface
 st.header("Search Transcripts")
 
-search_term = st.text_input("Enter search term:")
+# Search input and channel filter
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    search_term = st.text_input("Enter search term:")
+
+with col2:
+    # Get available channels for filter
+    available_channels = get_cached_channels()
+    channel_options = ["All Channels"] + available_channels
+    channel_filter = st.selectbox("Filter by channel:", channel_options)
 
 if search_term:
-    results = search_all_transcripts(search_term)
+    results = search_all_transcripts(search_term, channel_filter)
     
     if results:
         st.success(f"Found {sum(len(r['matches']) for r in results)} results across {len(results)} videos")
@@ -274,10 +369,12 @@ if search_term:
             except:
                 formatted_date = metadata['published_at']
             
+            # Separator line above each video result
+            st.markdown("---")
+            
             # Video header with title and metadata
             st.markdown(f"## {metadata['title']}")
             st.markdown(f"**Channel:** {metadata['channel_title']} | **Published:** {formatted_date}")
-            st.markdown("---")
             
             # Create a container for the video player that can be updated
             video_container = st.empty()
@@ -302,14 +399,12 @@ if search_term:
                 with col2:
                     st.write(f"*{match['text']}*")
             
-            # Update video URL if a timestamp was clicked
+            # Update video URL if a timestamp was clicked (with autoplay)
             if clicked_timestamp is not None:
-                current_video_url = f"https://www.youtube.com/embed/{video_id}?start={clicked_timestamp}"
+                current_video_url = f"https://www.youtube.com/embed/{video_id}?start={clicked_timestamp}&autoplay=1"
             
             # Display the video (either default or with timestamp)
             with video_container:
                 st.components.v1.iframe(current_video_url, width=560, height=315)
-            
-            st.markdown("---")
     else:
         st.warning("No results found in cached transcripts")
